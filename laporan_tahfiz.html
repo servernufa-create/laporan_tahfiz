@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aplikasi Laporan Tahfiz Sederhana</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- jsPDF CDN for PDF generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <!-- jsPDF Autotable (diperlukan untuk doc.autoTable) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.14/jspdf.plugin.autotable.min.js"></script>
+    
+    <!-- Konfigurasi Firebase dan Logika Aplikasi -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, addDoc, onSnapshot, collection, query, where, getDocs, updateDoc, deleteDoc, doc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- Setup Firebase Global ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : undefined;
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        let userId = '';
+        
+        let activeView = 'login-view';
+        let studentReports = []; // Laporan khusus untuk Siswa yang login
+        let allReports = [];      // Laporan keseluruhan untuk Admin
+        let reportIdToDelete = null;
+
+        // --- Fungsi UI Sederhana ---
+        function showAlert(message) {
+            const modal = document.getElementById('modal-message');
+            modal.textContent = message;
+            modal.classList.remove('opacity-0', 'scale-90', 'hidden');
+            modal.classList.add('opacity-100', 'scale-100');
+            setTimeout(() => {
+                modal.classList.remove('opacity-100', 'scale-100');
+                modal.classList.add('opacity-0', 'scale-90', 'hidden');
+            }, 3000);
+        }
+
+        function showView(viewId) {
+            activeView = viewId;
+            // Handle navigasi tab
+            document.querySelectorAll('.tab-content').forEach(view => {
+                view.classList.add('hidden');
+            });
+            document.getElementById(viewId).classList.remove('hidden');
+
+            // Set kelas aktif pada tombol tab
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                const targetView = btn.getAttribute('data-view');
+                if (targetView === viewId) {
+                    btn.classList.add('bg-blue-600', 'text-white');
+                    btn.classList.remove('bg-gray-200', 'text-gray-700');
+                } else {
+                    btn.classList.remove('bg-blue-600', 'text-white');
+                    btn.classList.add('bg-gray-200', 'text-gray-700');
+                }
+            });
+            // Tampilkan/sembunyikan tombol Logout
+            const logoutBtn = document.getElementById('logout-button');
+            if (viewId !== 'login-view') {
+                logoutBtn.classList.remove('hidden');
+            } else {
+                logoutBtn.classList.add('hidden');
+            }
+        }
+
+        // --- Fungsi Firebase & Dummy Data ---
+        async function addInitialUsers() {
+            const usersCollectionRef = collection(db, `/artifacts/${appId}/public/data/users`);
+            // Cek keberadaan salah satu guru sebagai indikasi data sudah diisi sebelumnya
+            const qCheck = query(usersCollectionRef, where("code", "==", "IQ_NF"));
+            const querySnapshotCheck = await getDocs(qCheck);
+
+            if (querySnapshotCheck.empty) {
+                // Tambah Pengguna Guru
+                const teachers = [
+                    { name: "M. Iqbal", code: "IQ_NF", role: "teacher" },
+                    { name: "M. Ilham", code: "IL_NF", role: "teacher" },
+                    { name: "M. Iqbal Fahreza", code: "RZ_NF", role: "teacher" },
+                    { name: "Mahpuddin", code: "MH_NF", role: "teacher" },
+                    { name: "Balqis Mawada", code: "BL_NF", role: "teacher" },
+                    { name: "Saskia Rahma Dalimunthe", code: "SR_NF", role: "teacher" },
+                    { name: "Irma Fitriani", code: "IF_NF", role: "teacher" },
+                    { name: "Sri Rahmadini Tanjung", code: "DN_NF", role: "teacher" },
+                    { name: "Rahmadani Nasution", code: "RD_NF", role: "teacher" },
+                    { name: "Hasanah Pratiwi", code: "HS_NF", role: "teacher" },
+                    { name: "Risky Nurfadhilah", code: "DL_NF", role: "teacher" },
+                    { name: "Aditya Muharta", code: "AM_NF1234", role: "teacher" } // Kode disesuaikan
+                ];
+                for (const teacher of teachers) {
+                    await addDoc(usersCollectionRef, teacher);
+                }
+                
+                // Tambah Pengguna Admin 
+                await addDoc(usersCollectionRef, { name: "Aditya Muharta", code: "AM_NF1234", role: "admin" });
+                await addDoc(usersCollectionRef, { name: "Admin", code: "admin1234", role: "admin" });
+                
+                // Tambah Pengguna Siswa
+                await addDoc(usersCollectionRef, { name: "Siti Rahmawati", role: "student" });
+                await addDoc(usersCollectionRef, { name: "Ahmad Rizky", role: "student" });
+                console.log("Pengguna dummy ditambahkan (Guru, Siswa, dan Admin baru).");
+            }
+        }
+
+        // --- Otentikasi dan Inisialisasi ---
+        document.addEventListener('DOMContentLoaded', async () => {
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Kesalahan Otentikasi Firebase:", error);
+                showAlert("Autentikasi gagal.");
+            }
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    document.getElementById('user-id-display').textContent = `ID: ${userId}`;
+                    await addInitialUsers();
+                    document.getElementById('loading').classList.add('hidden');
+                    document.getElementById('main-app-container').classList.remove('hidden');
+                    showView('login-view');
+                } else {
+                    document.getElementById('loading').classList.add('hidden');
+                    showAlert("Tidak dapat mengautentikasi.");
+                }
+            });
+            // Set tanggal hari ini sebagai default
+            document.getElementById('report-date-input').value = new Date().toISOString().substring(0, 10);
+        });
+        
+        // --- Fungsi Reset/Logout BARU ---
+        window.resetApp = () => {
+            document.getElementById('current-user-display').textContent = 'Anda belum login';
+            // Reset form login
+            document.getElementById('teacher-name').value = '';
+            document.getElementById('teacher-code').value = '';
+            document.getElementById('student-name-login').value = '';
+            document.getElementById('admin-name').value = '';
+            document.getElementById('admin-code').value = '';
+            showView('login-view');
+            showAlert('Anda telah keluar.');
+        };
+
+
+        // --- Logika Login Guru ---
+        window.handleTeacherLogin = async () => {
+            const name = document.getElementById('teacher-name').value.trim();
+            const code = document.getElementById('teacher-code').value.trim();
+
+            if (!name || !code) return showAlert('Nama & Kode harus diisi.');
+
+            const q = query(collection(db, `/artifacts/${appId}/public/data/users`), 
+                where("name", "==", name), 
+                where("code", "==", code), 
+                where("role", "==", "teacher")
+            );
+            const snapshot = await getDocs(q);
+
+            if (snapshot.empty) {
+                showAlert("Guru tidak ditemukan.");
+                return;
+            }
+            document.getElementById('current-user-display').textContent = `Guru: ${name}`;
+            showView('teacher-view');
+        };
+
+        // --- Logika Login Siswa ---
+        window.handleStudentLogin = async () => {
+            const name = document.getElementById('student-name-login').value.trim();
+
+            if (!name) return showAlert('Nama Siswa harus diisi.');
+
+            const q = query(collection(db, `/artifacts/${appId}/public/data/users`), 
+                where("name", "==", name), 
+                where("role", "==", "student")
+            );
+            const snapshot = await getDocs(q);
+
+            if (snapshot.empty) {
+                showAlert("Siswa tidak ditemukan.");
+                return;
+            }
+            document.getElementById('current-user-display').textContent = `Siswa: ${name}`;
+            fetchStudentReports(name);
+            showView('student-view');
+        };
+
+        // --- Logika Login Admin BARU ---
+        window.handleAdminLogin = async () => {
+            const name = document.getElementById('admin-name').value.trim();
+            const code = document.getElementById('admin-code').value.trim();
+
+            if (!name || !code) return showAlert('Nama & Kode Admin harus diisi.');
+
+            const q = query(collection(db, `/artifacts/${appId}/public/data/users`), 
+                where("name", "==", name), 
+                where("code", "==", code), 
+                where("role", "==", "admin")
+            );
+            const snapshot = await getDocs(q);
+
+            if (snapshot.empty) {
+                showAlert("Akses Admin ditolak. Nama atau Kode salah.");
+                return;
+            }
+            document.getElementById('current-user-display').textContent = `Admin: ${name}`;
+            fetchAdminReports(); 
+            showView('admin-view');
+        };
+
+        // --- Logika Guru (Submit) ---
+        window.handleReportSubmit = async () => {
+            const studentName = document.getElementById('student-name-input').value.trim();
+            const surah = document.getElementById('surah-input').value.trim();
+            const ayat = document.getElementById('ayat-input').value.trim();
+            const notes = document.getElementById('notes-input').value.trim();
+            const reportDate = document.getElementById('report-date-input').value;
+
+            if (!studentName || !surah || !ayat || !notes || !reportDate) {
+                return showAlert('Semua field laporan harus diisi.');
+            }
+
+            try {
+                await addDoc(collection(db, `/artifacts/${appId}/public/data/tahfiz_reports`), {
+                    studentName, surah, ayat, notes, reportDate,
+                    timestamp: new Date().toISOString()
+                });
+                showAlert('Laporan berhasil disimpan!');
+                document.getElementById('report-form').reset();
+                document.getElementById('report-date-input').value = new Date().toISOString().substring(0, 10);
+            } catch (e) {
+                console.error("Kesalahan saat menambahkan dokumen: ", e);
+                showAlert("Gagal menyimpan laporan.");
+            }
+        };
+
+        // --- Logika Siswa (Lihat Laporan) ---
+        function fetchStudentReports(name) {
+            const reportsQuery = query(collection(db, `/artifacts/${appId}/public/data/tahfiz_reports`), where("studentName", "==", name));
+            
+            onSnapshot(reportsQuery, (snapshot) => {
+                studentReports = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                studentReports.sort((a, b) => new Date(b.reportDate) - new Date(a.reportDate));
+                renderStudentReports();
+            }, (error) => {
+                console.error("Kesalahan saat mengambil laporan:", error);
+                showAlert("Gagal mengambil laporan.");
+            });
+        }
+
+        function renderStudentReports() {
+            const tableBody = document.getElementById('report-table-body');
+            tableBody.innerHTML = '';
+            
+            if (studentReports.length === 0) {
+                tableBody.innerHTML = `<tr><td colspan="4" class="py-4 text-center text-gray-400">Belum ada laporan.</td></tr>`;
+                document.getElementById('pdf-button').classList.add('hidden');
+                return;
+            }
+            
+            studentReports.forEach(report => {
+                const row = document.createElement('tr');
+                row.classList.add('border-b hover:bg-gray-50');
+                row.innerHTML = `
+                    <td class="px-4 py-3">${report.reportDate}</td>
+                    <td class="px-4 py-3">${report.surah}</td>
+                    <td class="px-4 py-3">${report.ayat}</td>
+                    <td class="px-4 py-3">${report.notes}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+            document.getElementById('pdf-button').classList.remove('hidden');
+        }
+
+        // --- Logika Admin (Kelola Laporan) BARU ---
+        function fetchAdminReports() {
+            // Query untuk mengambil SEMUA laporan tahfiz
+            const reportsQuery = collection(db, `/artifacts/${appId}/public/data/tahfiz_reports`);
+            
+            // Menggunakan onSnapshot untuk real-time update
+            onSnapshot(reportsQuery, (snapshot) => {
+                allReports = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                allReports.sort((a, b) => new Date(b.reportDate) - new Date(a.reportDate));
+                renderAdminReports();
+            }, (error) => {
+                console.error("Kesalahan saat mengambil semua laporan:", error);
+                showAlert("Gagal mengambil data Admin.");
+            });
+        }
+
+        function renderAdminReports() {
+            const tableBody = document.getElementById('admin-table-body');
+            // Implementasi Fitur Cari
+            const searchInput = document.getElementById('admin-search-input').value.toLowerCase();
+            tableBody.innerHTML = '';
+            
+            const filteredReports = allReports.filter(report => 
+                report.studentName.toLowerCase().includes(searchInput) ||
+                report.surah.toLowerCase().includes(searchInput)
+            );
+            
+            if (filteredReports.length === 0) {
+                tableBody.innerHTML = `<tr><td colspan="4" class="py-4 text-center text-gray-400">Tidak ada laporan atau hasil pencarian kosong.</td></tr>`;
+                return;
+            }
+            
+            filteredReports.forEach(report => {
+                const row = document.createElement('tr');
+                row.classList.add('border-b hover:bg-red-50');
+                row.innerHTML = `
+                    <td class="px-4 py-3 whitespace-nowrap">${report.reportDate}</td>
+                    <td class="px-4 py-3 font-semibold">${report.studentName}</td>
+                    <td class="px-4 py-3">${report.surah} (${report.ayat})</td>
+                    <td class="px-4 py-3 text-center space-x-2 whitespace-nowrap">
+                        <button onclick="openEditModal('${report.id}', '${report.studentName}', '${report.surah}', '${report.ayat}', '${report.notes}', '${report.reportDate}')" 
+                                class="text-blue-600 hover:text-blue-800 font-medium text-xs">
+                            Edit
+                        </button>
+                        <button onclick="openDeleteConfirmModal('${report.id}', '${report.studentName}')" 
+                                class="text-red-600 hover:text-red-800 font-medium text-xs">
+                            Hapus
+                        </button>
+                    </td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        // --- Logika Edit Modal (Admin) ---
+        window.openEditModal = (id, studentName, surah, ayat, notes, reportDate) => {
+            // Mengganti karakter ' menjadi '`' untuk menghindari masalah string dalam onclick
+            const cleanNotes = notes.replace(/'/g, '`');
+
+            document.getElementById('edit-report-id').value = id;
+            document.getElementById('edit-student-name').value = studentName;
+            document.getElementById('edit-surah-input').value = surah;
+            document.getElementById('edit-ayat-input').value = ayat;
+            document.getElementById('edit-notes-input').value = cleanNotes;
+            document.getElementById('edit-report-date-input').value = reportDate;
+            
+            document.getElementById('edit-modal').classList.remove('hidden');
+        };
+
+        window.closeEditModal = () => {
+            document.getElementById('edit-modal').classList.add('hidden');
+        };
+
+        window.handleEditReport = async () => {
+            const id = document.getElementById('edit-report-id').value;
+            const studentName = document.getElementById('edit-student-name').value.trim();
+            const surah = document.getElementById('edit-surah-input').value.trim();
+            const ayat = document.getElementById('edit-ayat-input').value.trim();
+            const notes = document.getElementById('edit-notes-input').value.trim();
+            const reportDate = document.getElementById('edit-report-date-input').value;
+
+            if (!studentName || !surah || !ayat || !notes || !reportDate) {
+                return showAlert('Semua field harus diisi.');
+            }
+            
+            const reportRef = doc(db, `/artifacts/${appId}/public/data/tahfiz_reports`, id);
+            try {
+                await updateDoc(reportRef, {
+                    studentName, surah, ayat, notes, reportDate,
+                    updatedAt: new Date().toISOString()
+                });
+                showAlert('Laporan berhasil diperbarui!');
+                closeEditModal();
+            } catch (e) {
+                console.error("Error memperbarui dokumen: ", e);
+                showAlert("Gagal memperbarui laporan.");
+            }
+        };
+        
+        // --- Logika Hapus Modal (Admin) ---
+        window.openDeleteConfirmModal = (reportId, studentName) => {
+            reportIdToDelete = reportId;
+            document.getElementById('delete-student-name-display').textContent = studentName;
+            document.getElementById('delete-modal').classList.remove('hidden');
+        };
+
+        window.closeDeleteConfirmModal = () => {
+            document.getElementById('delete-modal').classList.add('hidden');
+            reportIdToDelete = null;
+        };
+
+        window.confirmDelete = async () => {
+            const id = reportIdToDelete;
+            if (!id) return;
+            
+            closeDeleteConfirmModal();
+
+            const reportRef = doc(db, `/artifacts/${appId}/public/data/tahfiz_reports`, id);
+            try {
+                await deleteDoc(reportRef);
+                showAlert(`Laporan berhasil dihapus.`);
+            } catch (e) {
+                console.error("Error menghapus dokumen: ", e);
+                showAlert("Gagal menghapus laporan.");
+            }
+        };
+
+        // --- Logika PDF Siswa ---
+        window.generatePdf = () => {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            
+            const studentName = document.getElementById('current-user-display').textContent.replace('Siswa: ', '');
+            
+            doc.setFontSize(18);
+            doc.text(`Laporan Tahfiz Siswa: ${studentName}`, 10, 15);
+            doc.setFontSize(10);
+            doc.text(`Dicetak pada: ${new Date().toLocaleDateString('id-ID')}`, 10, 25);
+            
+            const tableData = studentReports.map(report => [
+                report.reportDate,
+                report.surah,
+                report.ayat,
+                report.notes
+            ]);
+            
+            doc.autoTable({
+                startY: 35,
+                head: [['Tanggal', 'Surah', 'Ayat', 'Catatan']],
+                body: tableData,
+                styles: { fontSize: 9, cellPadding: 2 },
+                headStyles: { fillColor: [37, 99, 235], textColor: 255 } // Tailwind blue-600
+            });
+            
+            doc.save(`laporan_tahfiz_${studentName.replace(/\s/g, '_')}.pdf`);
+        };
+        
+        // --- Logika PDF Admin BARU ---
+        window.generateAllPdf = () => {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF('p', 'mm', 'a4'); // Gunakan format A4
+            
+            doc.setFontSize(18);
+            doc.text(`LAPORAN TAHFIZ KESELURUHAN`, 10, 15);
+            doc.setFontSize(10);
+            doc.text(`Total Laporan: ${allReports.length}. Dicetak pada: ${new Date().toLocaleDateString('id-ID')}`, 10, 25);
+            
+            const tableData = allReports.map(report => [
+                report.reportDate,
+                report.studentName,
+                report.surah,
+                report.ayat,
+                report.notes
+            ]);
+            
+            doc.autoTable({
+                startY: 35,
+                head: [['Tanggal', 'Siswa', 'Surah', 'Ayat', 'Catatan']],
+                body: tableData,
+                styles: { fontSize: 8, cellPadding: 1.5 },
+                headStyles: { fillColor: [239, 68, 68], textColor: 255 } // Tailwind red-600
+            });
+            
+            doc.save(`laporan_tahfiz_keseluruhan_${new Date().getFullYear()}.pdf`);
+        };
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-50 flex items-center justify-center min-h-screen p-2 sm:p-4">
+
+    <!-- Modal Peringatan Khusus Sederhana -->
+    <div id="modal-message" class="hidden fixed top-0 left-1/2 transform -translate-x-1/2 mt-4 z-50 bg-red-600 text-white text-sm font-medium py-2 px-4 rounded-lg shadow-xl transition-all duration-500 opacity-0 scale-90">
+        <!-- Pesan akan ditampilkan di sini -->
+    </div>
+    
+    <!-- Modal Edit Laporan (Admin) -->
+    <div id="edit-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6">
+            <h3 class="text-xl font-bold text-gray-800 mb-4 text-center">EDIT LAPORAN SISWA</h3>
+            
+            <form id="edit-form" class="space-y-3">
+                <input type="hidden" id="edit-report-id">
+                
+                <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Nama Siswa (Tidak dapat diubah)</label>
+                    <input type="text" id="edit-student-name" class="w-full p-2 border rounded-md text-sm bg-gray-100" readonly>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-600 mb-1">Surah</label>
+                        <input type="text" id="edit-surah-input" class="w-full p-2 border rounded-md text-sm focus:ring-red-500 focus:border-red-500">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-600 mb-1">Ayat</label>
+                        <input type="text" id="edit-ayat-input" class="w-full p-2 border rounded-md text-sm focus:ring-red-500 focus:border-red-500">
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Tanggal Laporan</label>
+                    <input type="date" id="edit-report-date-input" class="w-full p-2 border rounded-md text-sm focus:ring-red-500 focus:border-red-500">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Catatan</label>
+                    <textarea id="edit-notes-input" rows="3" class="w-full p-2 border rounded-md text-sm focus:ring-red-500 focus:border-red-500"></textarea>
+                </div>
+                
+                <div class="pt-4 flex justify-end space-x-3">
+                    <button type="button" onclick="closeEditModal()" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg font-medium hover:bg-gray-300 transition duration-200">Batal</button>
+                    <button type="button" onclick="handleEditReport()" class="px-4 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition duration-200">Simpan Perubahan</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal Konfirmasi Hapus (Admin) -->
+    <div id="delete-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6 text-center">
+            <h3 class="text-lg font-bold text-red-700 mb-3">KONFIRMASI HAPUS</h3>
+            <p class="text-gray-600 mb-5">Anda yakin ingin menghapus laporan Tahfiz untuk siswa: <span id="delete-student-name-display" class="font-semibold text-red-600"></span>?</p>
+            
+            <div class="flex justify-center space-x-4">
+                <button type="button" onclick="closeDeleteConfirmModal()" class="px-5 py-2 bg-gray-200 text-gray-700 rounded-lg font-medium hover:bg-gray-300 transition duration-200">Batal</button>
+                <button type="button" onclick="confirmDelete()" class="px-5 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition duration-200">Ya, Hapus</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Layar Pemuatan -->
+    <div id="loading" class="flex flex-col items-center justify-center text-gray-600 absolute inset-0 bg-white z-40">
+        <svg class="animate-spin h-10 w-10 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        <p class="mt-4">Memuat aplikasi...</p>
+    </div>
+
+    <div class="w-full max-w-xl bg-white rounded-xl shadow-2xl p-4 sm:p-6 relative hidden border border-gray-100" id="main-app-container">
+
+        <h1 class="text-xl font-bold text-center text-gray-800 mb-2">APLIKASI LAPORAN TAHFIZ</h1>
+        <div class="flex justify-between items-center text-xs text-gray-400 mb-4">
+             <span id="user-id-display">ID: ...</span> 
+             <div class="flex items-center space-x-2">
+                 <span id="current-user-display" class="font-semibold text-gray-600">Anda belum login</span>
+                 <button id="logout-button" onclick="resetApp()" class="hidden text-red-500 hover:text-red-700 font-medium py-1 px-2 rounded-lg border border-red-300 bg-red-50 transition duration-200 shadow-sm text-xs">
+                    Keluar
+                 </button>
+             </div>
+        </div>
+
+        <!-- Navigasi Tab Sederhana -->
+        <div class="flex justify-around bg-gray-100 p-1 rounded-lg mb-6 shadow-inner">
+            <button data-view="login-view" onclick="showView('login-view')" class="tab-button flex-1 py-2 text-sm font-semibold rounded-lg transition-colors bg-blue-600 text-white">Login</button>
+            <button data-view="teacher-view" onclick="showView('teacher-view')" class="tab-button flex-1 py-2 text-sm font-semibold rounded-lg transition-colors bg-gray-200 text-gray-700">Guru</button>
+            <button data-view="student-view" onclick="showView('student-view')" class="tab-button flex-1 py-2 text-sm font-semibold rounded-lg transition-colors bg-gray-200 text-gray-700">Siswa</button>
+            <button data-view="admin-view" onclick="showView('admin-view')" class="tab-button flex-1 py-2 text-sm font-semibold rounded-lg transition-colors bg-gray-200 text-gray-700">Admin</button>
+        </div>
+
+        <!-- Konten: Login -->
+        <div id="login-view" class="tab-content">
+            <h2 class="text-lg font-semibold text-gray-700 mb-4 text-center">Pilih Peran Anda</h2>
+            
+            <!-- Login Guru -->
+            <div class="bg-blue-50 p-4 rounded-lg mb-4 border border-blue-200">
+                <h3 class="font-bold text-blue-700 mb-3">MASUK SEBAGAI GURU</h3>
+                <div>
+                    <label for="teacher-name" class="block text-xs font-medium text-gray-600 mb-1">Nama Guru (Sesuai database)</label>
+                    <input type="text" id="teacher-name" class="w-full p-2 mb-2 border rounded-md focus:ring-blue-500 focus:border-blue-500 text-sm">
+                </div>
+                <div>
+                    <label for="teacher-code" class="block text-xs font-medium text-gray-600 mb-1">Kode Akses Guru</label>
+                    <input type="password" id="teacher-code" class="w-full p-2 mb-4 border rounded-md focus:ring-blue-500 focus:border-blue-500 text-sm">
+                </div>
+                <button onclick="handleTeacherLogin()" class="w-full bg-blue-600 text-white py-2 rounded-lg font-medium hover:bg-blue-700 transition duration-200">Masuk Guru</button>
+            </div>
+
+            <!-- Login Siswa -->
+            <div class="bg-green-50 p-4 rounded-lg mb-4 border border-green-200">
+                <h3 class="font-bold text-green-700 mb-3">MASUK SEBAGAI SISWA</h3>
+                <div>
+                    <label for="student-name-login" class="block text-xs font-medium text-gray-600 mb-1">Nama Siswa (Nama lengkap)</label>
+                    <input type="text" id="student-name-login" class="w-full p-2 mb-4 border rounded-md focus:ring-green-500 focus:border-green-500 text-sm">
+                </div>
+                <button onclick="handleStudentLogin()" class="w-full bg-green-600 text-white py-2 rounded-lg font-medium hover:bg-green-700 transition duration-200">Masuk Siswa</button>
+            </div>
+
+            <!-- Login Admin BARU -->
+            <div class="bg-red-50 p-4 rounded-lg border border-red-200">
+                <h3 class="font-bold text-red-700 mb-3">MASUK SEBAGAI ADMIN</h3>
+                <div>
+                    <label for="admin-name" class="block text-xs font-medium text-gray-600 mb-1">Nama Admin</label>
+                    <input type="text" id="admin-name" class="w-full p-2 mb-2 border rounded-md focus:ring-red-500 focus:border-red-500 text-sm">
+                </div>
+                <div>
+                    <label for="admin-code" class="block text-xs font-medium text-gray-600 mb-1">Kode Akses Admin</label>
+                    <input type="password" id="admin-code" class="w-full p-2 mb-4 border rounded-md focus:ring-red-500 focus:border-red-500 text-sm">
+                </div>
+                <button onclick="handleAdminLogin()" class="w-full bg-red-600 text-white py-2 rounded-lg font-medium hover:bg-red-700 transition duration-200">Masuk Admin</button>
+            </div>
+        </div>
+
+        <!-- Konten: Guru (Input Laporan) -->
+        <div id="teacher-view" class="tab-content hidden">
+            <h2 class="text-lg font-semibold text-gray-700 mb-4 text-center">INPUT LAPORAN BARU</h2>
+
+            <form id="report-form" class="bg-gray-100 p-4 rounded-lg">
+                <div class="grid grid-cols-2 gap-3 mb-3">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-600 mb-1">Nama Siswa</label>
+                        <input type="text" id="student-name-input" class="w-full p-2 border rounded-md text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-600 mb-1">Tanggal</label>
+                        <input type="date" id="report-date-input" class="w-full p-2 border rounded-md text-sm">
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3 mb-3">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-600 mb-1">Surah</label>
+                        <input type="text" id="surah-input" class="w-full p-2 border rounded-md text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-600 mb-1">Ayat</label>
+                        <input type="text" id="ayat-input" class="w-full p-2 border rounded-md text-sm">
+                    </div>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Catatan</label>
+                    <textarea id="notes-input" rows="2" class="w-full p-2 border rounded-md text-sm"></textarea>
+                </div>
+                <button type="button" onclick="handleReportSubmit()" class="w-full bg-blue-600 text-white py-2 rounded-lg font-semibold hover:bg-blue-700 transition duration-200 shadow-md">Simpan Laporan</button>
+            </form>
+        </div>
+
+        <!-- Konten: Siswa (Lihat Laporan) -->
+        <div id="student-view" class="tab-content hidden">
+            <h2 class="text-lg font-semibold text-gray-700 mb-4 text-center">RIWAYAT LAPORAN HAFALAN</h2>
+            
+            <div class="overflow-x-auto shadow-md rounded-lg border border-gray-200 mb-4">
+                <table class="w-full text-sm text-left text-gray-600">
+                    <thead class="text-xs text-white uppercase bg-blue-600">
+                        <tr>
+                            <th scope="col" class="px-4 py-3">Tgl</th>
+                            <th scope="col" class="px-4 py-3">Surah</th>
+                            <th scope="col" class="px-4 py-3">Ayat</th>
+                            <th scope="col" class="px-4 py-3">Catatan</th>
+                        </tr>
+                    </thead>
+                    <tbody id="report-table-body" class="bg-white divide-y divide-gray-200">
+                        <!-- Laporan Siswa di sini -->
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="text-center">
+                <button id="pdf-button" onclick="generatePdf()" class="bg-red-600 text-white py-2 px-6 rounded-lg font-semibold hover:bg-red-700 transition duration-200 shadow-md hidden">Cetak PDF</button>
+            </div>
+        </div>
+        
+        <!-- Konten: Admin (Kelola Laporan) BARU -->
+        <div id="admin-view" class="tab-content hidden">
+            <h2 class="text-lg font-semibold text-gray-700 mb-4 text-center">PANEL ADMINISTRATOR (KELOLA LAPORAN)</h2>
+            
+            <!-- Fitur Cari -->
+            <input type="text" id="admin-search-input" oninput="renderAdminReports()" placeholder="Cari Nama Siswa atau Surah..." class="w-full p-2 mb-4 border rounded-md text-sm focus:ring-red-500 focus:border-red-500">
+
+            <div class="overflow-x-auto shadow-md rounded-lg border border-gray-200 mb-4">
+                <table class="w-full text-sm text-left text-gray-600">
+                    <thead class="text-xs text-white uppercase bg-red-600">
+                        <tr>
+                            <th scope="col" class="px-4 py-3">Tgl</th>
+                            <th scope="col" class="px-4 py-3">Siswa</th>
+                            <th scope="col" class="px-4 py-3">Surah/Ayat</th>
+                            <th scope="col" class="px-4 py-3 text-center">Aksi</th>
+                        </tr>
+                    </thead>
+                    <tbody id="admin-table-body" class="bg-white divide-y divide-gray-200">
+                        <!-- Semua Laporan di sini -->
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="text-center">
+                <button id="admin-pdf-button" onclick="generateAllPdf()" class="bg-red-600 text-white py-2 px-6 rounded-lg font-semibold hover:bg-red-700 transition duration-200 shadow-md">Download Semua Data (PDF)</button>
+            </div>
+        </div>
+
+    </div>
+</body>
+</html>
